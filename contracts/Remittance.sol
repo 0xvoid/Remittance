@@ -14,6 +14,11 @@ contract Remittance {
          require (msg.sender == contractOwner);
          _;
     }
+
+    modifier onlyWhenLive {
+        require (isRunning == true);
+        _;
+    }
     
     struct RemitStruct {
        address  exchanger;
@@ -35,7 +40,7 @@ contract Remittance {
     event LogSuccessfullyPaidOut    (address indexed payedAddress, uint payout, RemitStatus payoutType);
  
     function  Remittance()  
-        public 
+        public         
     { 
         contractOwner   = msg.sender;
         isRunning       = true;
@@ -44,6 +49,7 @@ contract Remittance {
     function Deposit(address _exchanger, bytes32 _remitString)
         public 
         payable
+        onlyWhenLive
         returns (bool success, bytes32 remitId)
     {
         require (msg.value  >  contractOwnerCommission); //TODO: ?before fail, log an event to notify insufficency
@@ -77,7 +83,7 @@ contract Remittance {
     
     function withdraw(bytes32 _remitId, bytes32 _password, address _depositor)
         public
-        payable
+        onlyWhenLive
         returns (bool success)
     {
         //exchanger only
@@ -113,7 +119,8 @@ contract Remittance {
     }
     
     function refund(bytes32 _remitId)
-        public 
+        public
+        onlyWhenLive 
         returns (bool success)
     {
         //Only despositor who has already deposited once
