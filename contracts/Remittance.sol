@@ -3,47 +3,44 @@ pragma solidity ^0.4.8;
 
 contract Remittance {
  
-    address public contractOwner;
-    uint    public contractOwnerCommission = 0; //for now 0
-    uint    public ownerBank;
-    bool    public isRunning;
-    uint    public duration = 10; //for now fixed
-    enum    RemitStatus {None, Deposited, Withdrawn, Refunded }
+    address public      owner;
+    uint    constant public    ownerCommission = 0; //for now 0
+    uint    public      ownerBank;
+    bool    public      isStopped;
+    uint    public      duration = 10; //for now fixed
+    
     
     modifier onlyOwner {
-         require (msg.sender == contractOwner);
+         require (msg.sender == owner);
          _;
     }
 
     modifier onlyWhenLive {
-        require (isRunning == true);
+        require (isStopped == true);
         _;
     }
     
     struct RemitStruct {
-       address  exchanger;
+       address  depositor;
        uint     amount;
-       uint     expiryBlock;
-       uint     commissionCut;
+       uint     expiryBlock;       
        bytes32  passString;
     }
+        
+    mapping(bytes32 => RemitStruct)     public RemitDataStore;
+    mapping(address => uint)            public DepositorDataStore;
     
-    struct DepositorStateStruct {
-       uint256                          nonce;
-       mapping( bytes32 => RemitStatus) remitStates;
-    }
-    
-    mapping(bytes32 => RemitStruct)             public RemitDataStore;
-    mapping(address => DepositorStateStruct)    public DepositorDataStore;
-    
-    event LogSuccessfullyDeposited  (address indexed depositor, address indexed exchanger,  uint amount);
-    event LogSuccessfullyPaidOut    (address indexed payedAddress, uint payout, RemitStatus payoutType);
+    event LogSuccessfullyDeposited  (bytes32 remitId, uint desposit, address indexed depositor, address indexed exchanger );
+    event LogSuccessfullyWithdrawn  (bytes32 remitId, uint payout, address indexed withdrawAddress);
+    event LogSuccessfullyRefunded   (bytes32 remitId, uint payout, address indexed refundAddress);
+    event LogCommisionCollected     (address indexed depositor, uint amount);
+    event LogOwnerWithdrwal         (uint withdrawAmount);
+    event LogContractStateChanged   (bool isStopped);
  
     function  Remittance()  
         public         
     { 
-        contractOwner   = msg.sender;
-        isRunning       = true;
+        owner   = msg.sender;
     }
     
     function Deposit(address _exchanger, bytes32 _remitString)
@@ -52,69 +49,45 @@ contract Remittance {
         onlyWhenLive
         returns (bool success, bytes32 remitId)
     {
-        require (msg.value  >  contractOwnerCommission); //TODO: ?before fail, log an event to notify insufficency
+        require (msg.value  >  ownerCommission);
         require (msg.sender != 0);
         require ( _exchanger  != 0);
                         
-        uint  currentNonce = DepositorDataStore[msg.sender].nonce;
+        uint  currentNonce = DepositorDataStore[msg.sender];
         uint nextNonce = currentNonce + 1;
-         
-         //TODO: find a less expensive  method to generate Id here        
-        bytes32 newDepositId = keccak256(msg.sender, nextNonce); 
-
-        DepositorDataStore[msg.sender].nonce = nextNonce;
-        DepositorDataStore[msg.sender].remitStates[newDepositId]  = RemitStatus.Deposited;
+        bytes32 newDepositId = keccak256(msg.sender, nextNonce);  //TODO: find a less expensive  method to generate Id here        
+        DepositorDataStore[msg.sender] = nextNonce;
        
-        uint depositAmount = msg.value - contractOwnerCommission;
+        uint depositAmount = msg.value - ownerCommission;
+        ownerBank += ownerCommission; //Pay self here
+        LogCommisionCollected(msg.sender, ownerCommission);
        
-        RemitStruct memory newRemit;
-        newRemit.exchanger = _exchanger;
-        newRemit.amount = depositAmount;
-        newRemit.commissionCut = contractOwnerCommission;
-        newRemit.expiryBlock = duration + block.number; 
-        //  _remitString = computed offline  as  keccak256(exchangerAddress, keccak256(receiverSecret))
-        newRemit.passString = _remitString; 
+        RemitStruct memory newRemit  = RemitStruct (msg.sender, depositAmount, duration + block.number, _remitString);
         RemitDataStore[newDepositId] = newRemit;
+        // _remitString = computed offline  as web3.utils.soliditySha3('Exchangeraddress', 'shaString' )) where 
+        // shaString = web3.utils.soliditySha3(web3.utils.soliditySha3('receiverSecretString') & Exchangeraddress starts with 0x
         
-        LogSuccessfullyDeposited(msg.sender, newRemit.exchanger,  newRemit.amount);
-        
+        LogSuccessfullyDeposited(remitId, depositAmount, msg.sender, _exchanger);
         return (true, newDepositId);
     }
     
-    function withdraw(bytes32 _remitId, bytes32 _password, address _depositor)
+    function withdraw(bytes32 _remitId, bytes32 _password)
         public
         onlyWhenLive
         returns (bool success)
-    {
-        //exchanger only
-        require(RemitDataStore[_remitId].exchanger == msg.sender);
+    {   
+        require(RemitDataStore[_remitId].amount != 0);                  //Fail re-entrancy first
+        require(RemitDataStore[_remitId].expiryBlock >=  block.number);  //Only remit NOT expired yet
         
-        //check depositor exists
-        require(DepositorDataStore[_depositor].nonce != 0);
-        
-        //check remit has been already withdrawn /refunded
-        require(DepositorDataStore[_depositor].remitStates[_remitId] == RemitStatus.Deposited);
-        
-        //check remit withdrawal has not expired
-        require(RemitDataStore[_remitId].expiryBlock >=  block.number);
-        
-        //check secrets match
-        //Here _password = computed offline as keccak256(receiverSecret)
-        //TODO: Test!
-        require(RemitDataStore[_remitId].passString == keccak256(msg.sender, _password) );
-        //LogPasswordError();
+        require(RemitDataStore[_remitId].passString == keccak256(msg.sender, _password) );  //check secrets match
+        //_password pre-computed offline as web3.utils.soliditySha3('receiverSecretString') 
         
         //Pay out withdrawal
         uint withdrawAmount = RemitDataStore[_remitId].amount;
-        uint remitCommissionCut = RemitDataStore[_remitId].commissionCut;
-        
-        if(remitCommissionCut > 0) {paySelf(remitCommissionCut);}
-        
-        DepositorDataStore[_depositor].remitStates[_remitId] = RemitStatus.Withdrawn;  //re-entrancy prevention
+        RemitDataStore[_remitId].amount = 0; //re-entrancy prevention
         msg.sender.transfer (withdrawAmount);
         
-        LogSuccessfullyPaidOut(msg.sender, withdrawAmount, RemitStatus.Withdrawn);
-        
+        LogSuccessfullyWithdrawn(_remitId, withdrawAmount, msg.sender);
         return true;
     }
     
@@ -123,61 +96,50 @@ contract Remittance {
         onlyWhenLive 
         returns (bool success)
     {
-        //Only despositor who has already deposited once
-        require(DepositorDataStore[msg.sender].nonce != 0);
-        
-        //Only unclaimed deposit can be refunded
-        require( DepositorDataStore[msg.sender].remitStates[_remitId] == RemitStatus.Deposited);
-        
-        //only a remit that has its Withdraw period expired
-        require(RemitDataStore[_remitId].expiryBlock <  block.number); //? Log an event here
+        require(RemitDataStore[_remitId].depositor == msg.sender);      //only remit's depositor
+        require(RemitDataStore[_remitId].amount != 0);                  //only unclaimed remit
+        require(RemitDataStore[_remitId].expiryBlock <  block.number);  //only expired remit
         
         //Payout refund
         uint refundAmount = RemitDataStore[_remitId].amount;
-        uint remitCommissionCut = RemitDataStore[_remitId].commissionCut;
-        
-        if(remitCommissionCut > 0) { paySelf(remitCommissionCut); }
-        DepositorDataStore[msg.sender].remitStates[_remitId] = RemitStatus.Refunded;  //re-entrancy prevention
-       
+        RemitDataStore[_remitId].amount = 0; //re-entrancy prevention
         msg.sender.transfer (refundAmount); 
-        LogSuccessfullyPaidOut(msg.sender, refundAmount, RemitStatus.Refunded);
-         
+        
+        LogSuccessfullyRefunded(_remitId, refundAmount, msg.sender);
         return true;
     }
     
-    
-    function paySelf(uint _commissionCut)
-        private
-    {
-        ownerBank += _commissionCut;
-    }
-    
-    function toggleContractState(bool _onOff)
+        
+    function setContractState(bool _onOff)
         public 
         onlyOwner
         returns (bool toggleValue)
     {
-        return isRunning = _onOff;
+        LogContractStateChanged(_onOff);
+        return isStopped = _onOff;
     }
     
     function ownerWithdrawal(uint _withdrawAmount) 
         public 
         onlyOwner
+        onlyWhenLive
         returns (bool success)
     {
-        if(ownerBank >_withdrawAmount){
-            ownerBank -= _withdrawAmount;
-            msg.sender.transfer(_withdrawAmount);
-            return true;
-        }
-        return false; //TODO: Event or meaningful return param
+        require(ownerBank >= _withdrawAmount);
+        require(ownerBank != 0 );
+        ownerBank -= _withdrawAmount;
+        msg.sender.transfer(_withdrawAmount);
+        
+        LogOwnerWithdrwal(_withdrawAmount);
+        return true;
     }
     
      function killMe()
         public
-        onlyOwner
+        onlyOwner        
     {
-        selfdestruct(contractOwner);
+        require(isStopped); //prevent mistake of calling this when contract is live
+        selfdestruct(owner);
     }
     
     function () public {revert();}    

@@ -16,16 +16,16 @@ contract("Remittance", function(accounts) {
 
 	//constructor 
 	it("should be owned by owner", function(){
-		return remitContract.contractOwner({from: notInvited})
+		return remitContract.owner({from: notInvited})
 		.then(function(_actualOwner){
 			assert.strictEqual(_actualOwner, owner,"contract is not owned by owner"); 		
 		});
 	});
 
 	it("owner can pause entire contract", function (){
-		return remitContract.toggleContractState(false, {from: owner})
+		return remitContract.setContractState(false, {from: owner})
 		.then( function(txn){
-			return remitContract.isRunning({from: owner});		
+			return remitContract.isStopped({from: owner});		
 		})
 		.then(function (_result){
 			assert.strictEqual(_result,false, "contract running state not changed by owner");
